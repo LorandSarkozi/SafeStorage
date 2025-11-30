@@ -8,7 +8,7 @@ typedef struct _GLOBAL_STATE
     char CurrentUsername[11]; 
     char AppDir[MAX_PATH];
     DWORD LoginAttempts;
-    DWORD LastAttemptTime;
+    ULONGLONG LastAttemptTime;
 } GLOBAL_STATE, *PGLOBAL_STATE;
 
 static GLOBAL_STATE gState = { 0 };
@@ -24,6 +24,8 @@ static GLOBAL_STATE gState = { 0 };
 
 static NTSTATUS ValidateUsername(const char* Username, uint16_t UsernameLength);
 static NTSTATUS ValidatePassword(const char* Password, uint16_t PasswordLength);
+static NTSTATUS ValidateSubmissionName(const char* SubmissionName, uint16_t SubmissionNameLength);
+static NTSTATUS ValidateFilePath(const char* FilePath, uint16_t FilePathLength);
 static NTSTATUS ComputePasswordHash(const char* Password, uint16_t PasswordLength, char* HashBuffer, size_t HashBufferSize);
 static NTSTATUS UserExists(const char* Username, uint16_t UsernameLength, BOOLEAN* Exists);
 static NTSTATUS CreateUserEntry(const char* Username, uint16_t UsernameLength, const char* PasswordHash);
@@ -198,7 +200,7 @@ SafeStorageHandleLogin(
 )
 {
     NTSTATUS status = STATUS_SUCCESS;
-    DWORD currentTime = 0;
+    ULONGLONG currentTime = 0;
 
     if (!gState.IsInitialized)
     {
@@ -214,7 +216,7 @@ SafeStorageHandleLogin(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    currentTime = GetTickCount();
+    currentTime = GetTickCount64();
     if (gState.LoginAttempts >= MAX_LOGIN_ATTEMPTS)
     {
         if ((currentTime - gState.LastAttemptTime) < LOCKOUT_DURATION_MS)
@@ -304,18 +306,18 @@ SafeStorageHandleStore(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    if (SubmissionName == NULL || SubmissionNameLength == 0 || SubmissionNameLength >= MAX_PATH)
+    status = ValidateSubmissionName(SubmissionName, SubmissionNameLength);
+    if (!NT_SUCCESS(status))
     {
         LeaveCriticalSection(&gState.Lock);
-        printf("Error: Invalid submission name.\r\n");
-        return STATUS_INVALID_PARAMETER;
+        return status;
     }
 
-    if (SourceFilePath == NULL || SourceFilePathLength == 0 || SourceFilePathLength >= MAX_PATH)
+    status = ValidateFilePath(SourceFilePath, SourceFilePathLength);
+    if (!NT_SUCCESS(status))
     {
         LeaveCriticalSection(&gState.Lock);
-        printf("Error: Invalid source file path.\r\n");
-        return STATUS_INVALID_PARAMETER;
+        return status;
     }
 
     if (GetFileAttributesA(SourceFilePath) == INVALID_FILE_ATTRIBUTES)
@@ -374,18 +376,18 @@ SafeStorageHandleRetrieve(
         return STATUS_INVALID_DEVICE_STATE;
     }
 
-    if (SubmissionName == NULL || SubmissionNameLength == 0 || SubmissionNameLength >= MAX_PATH)
+    status = ValidateSubmissionName(SubmissionName, SubmissionNameLength);
+    if (!NT_SUCCESS(status))
     {
         LeaveCriticalSection(&gState.Lock);
-        printf("Error: Invalid submission name.\r\n");
-        return STATUS_INVALID_PARAMETER;
+        return status;
     }
 
-    if (DestinationFilePath == NULL || DestinationFilePathLength == 0 || DestinationFilePathLength >= MAX_PATH)
+    status = ValidateFilePath(DestinationFilePath, DestinationFilePathLength);
+    if (!NT_SUCCESS(status))
     {
         LeaveCriticalSection(&gState.Lock);
-        printf("Error: Invalid destination file path.\r\n");
-        return STATUS_INVALID_PARAMETER;
+        return status;
     }
 
     hr = StringCchPrintfA(sourcePath, MAX_PATH, "%s\\users\\%s\\%.*s", 
@@ -520,6 +522,118 @@ ValidatePassword(
     {
         printf("Error: Password must contain at least one special character (!@#$%%^&).\r\n");
         return STATUS_INVALID_PARAMETER;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
+static NTSTATUS
+ValidateSubmissionName(
+    const char* SubmissionName,
+    uint16_t SubmissionNameLength
+)
+{
+    uint16_t i = 0;
+
+    if (SubmissionName == NULL)
+    {
+        printf("Error: Submission name is NULL.\r\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (SubmissionNameLength == 0 || SubmissionNameLength >= MAX_PATH)
+    {
+        printf("Error: Submission name length is invalid.\r\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    for (i = 0; i < SubmissionNameLength; i++)
+    {
+        char c = SubmissionName[i];
+
+        if (c == '\\' || c == '/' || c == ':' || c == '*' || 
+            c == '?' || c == '"' || c == '<' || c == '>' || 
+            c == '|' || c == '\0')
+        {
+            printf("Error: Submission name contains invalid characters (\\/:*?\"<>|).\r\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (c < 32 || c == 127)
+        {
+            printf("Error: Submission name contains control characters.\r\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    if (SubmissionNameLength >= 2)
+    {
+        if (SubmissionName[0] == '.' && SubmissionName[1] == '.')
+        {
+            printf("Error: Submission name cannot start with '..'.\r\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    if (SubmissionName[0] == '.')
+    {
+        printf("Error: Submission name cannot start with '.'.\r\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+
+static NTSTATUS
+ValidateFilePath(
+    const char* FilePath,
+    uint16_t FilePathLength
+)
+{
+    uint16_t i = 0;
+    BOOLEAN hasNullTerminator = FALSE;
+
+    if (FilePath == NULL)
+    {
+        printf("Error: File path is NULL.\r\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (FilePathLength == 0 || FilePathLength >= MAX_PATH)
+    {
+        printf("Error: File path length is invalid.\r\n");
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    for (i = 0; i < FilePathLength; i++)
+    {
+        if (FilePath[i] == '\0')
+        {
+            hasNullTerminator = TRUE;
+            break;
+        }
+    }
+
+    if (!hasNullTerminator && FilePathLength < MAX_PATH)
+    {
+        if (FilePath[FilePathLength] != '\0')
+        {
+            printf("Error: File path is not null-terminated.\r\n");
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    for (i = 0; i < FilePathLength && FilePath[i] != '\0'; i++)
+    {
+        char c = FilePath[i];
+
+        if (c < 32 && c != '\0')
+        {
+            printf("Error: File path contains control characters.\r\n");
+            return STATUS_INVALID_PARAMETER;
+        }
     }
 
     return STATUS_SUCCESS;
@@ -883,6 +997,7 @@ CopyFileWithThreadPool(
 {
     FILE_COPY_CONTEXT context = { 0 };
     HANDLE threads[4] = { 0 };
+    DWORD threadIds[4] = { 0 };
     DWORD threadCount = 0;
     DWORD i = 0;
     NTSTATUS status = STATUS_SUCCESS;
@@ -927,7 +1042,7 @@ CopyFileWithThreadPool(
 
     for (i = 0; i < threadCount; i++)
     {
-        threads[i] = CreateThread(NULL, 0, CopyChunkWorker, &context, 0, NULL);
+        threads[i] = CreateThread(NULL, 0, CopyChunkWorker, &context, 0, &threadIds[i]);
         if (threads[i] == NULL)
         {
             threadCount = i;
